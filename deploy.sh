@@ -16,6 +16,22 @@ fi
 
 echo "Using: $DOCKER_COMPOSE"
 
+# Check if frontend is built
+if [ ! -d "frontend/dist" ]; then
+    echo ""
+    echo "ERROR: frontend/dist directory not found!"
+    echo ""
+    echo "The frontend must be built before deployment."
+    echo "On your LOCAL machine (with Node.js), run:"
+    echo ""
+    echo "  cd frontend"
+    echo "  npm install"
+    echo "  npm run build"
+    echo ""
+    echo "Then copy the entire project (including frontend/dist) to the server."
+    exit 1
+fi
+
 # Check if .env exists
 if [ ! -f .env ]; then
     echo "Creating .env from .env.example..."
@@ -46,7 +62,7 @@ $DOCKER_COMPOSE ps
 
 echo ""
 echo "=== Deployment Complete ==="
-echo "Application is running at: http://localhost"
+echo "Application is running at: http://$(hostname -I | awk '{print $1}' 2>/dev/null || echo 'localhost')"
 echo ""
 echo "Useful commands:"
 echo "  View logs:     $DOCKER_COMPOSE logs -f"
