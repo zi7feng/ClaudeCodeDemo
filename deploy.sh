@@ -3,6 +3,19 @@ set -e
 
 echo "=== Weight Stock Platform Deployment ==="
 
+# Detect docker compose command (v2 uses 'docker compose', v1 uses 'docker-compose')
+if docker compose version &> /dev/null; then
+    DOCKER_COMPOSE="docker compose"
+elif docker-compose version &> /dev/null; then
+    DOCKER_COMPOSE="docker-compose"
+else
+    echo "Error: Neither 'docker compose' nor 'docker-compose' found."
+    echo "Please install Docker Compose: https://docs.docker.com/compose/install/"
+    exit 1
+fi
+
+echo "Using: $DOCKER_COMPOSE"
+
 # Check if .env exists
 if [ ! -f .env ]; then
     echo "Creating .env from .env.example..."
@@ -22,21 +35,21 @@ fi
 
 # Build and start containers
 echo "Building and starting containers..."
-docker compose up --build -d
+$DOCKER_COMPOSE up --build -d
 
 # Wait for services to be ready
 echo "Waiting for services to start..."
 sleep 5
 
 # Show status
-docker compose ps
+$DOCKER_COMPOSE ps
 
 echo ""
 echo "=== Deployment Complete ==="
 echo "Application is running at: http://localhost"
 echo ""
 echo "Useful commands:"
-echo "  View logs:     docker compose logs -f"
-echo "  Stop:          docker compose down"
-echo "  Restart:       docker compose restart"
-echo "  View backend:  docker compose logs backend"
+echo "  View logs:     $DOCKER_COMPOSE logs -f"
+echo "  Stop:          $DOCKER_COMPOSE down"
+echo "  Restart:       $DOCKER_COMPOSE restart"
+echo "  View backend:  $DOCKER_COMPOSE logs backend"
