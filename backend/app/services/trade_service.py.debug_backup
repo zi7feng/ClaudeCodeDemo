@@ -1,0 +1,430 @@
+from decimal import Decimal
+from typing import List, Dict, Any
+
+from ..models import db, Trade, Balance, User, Price
+
+
+class TradeService:
+    """Service for managing trades and balances."""
+
+    @staticmethod
+    def recharge(user_id: int, amount: float) -> Balance:
+        """
+        Add funds to a user's balance.
+
+        Args:
+            user_id: The user's ID
+            amount: Amount to add (must be positive)
+
+        Returns:
+            Updated Balance record
+
+        Raises:
+            ValueError: If validation fails
+        """
+        if amount <= 0:
+            raise ValueError('Amount must be positive')
+
+        # Get or create balance record with row lock to prevent race conditions
+        balance = Balance.query.filter_by(userId=user_id).with_for_update().first()
+        if not balance:
+            balance = Balance(userId=user_id, balance=Decimal('0.00'))
+            db.session.add(balance)
+
+        # Update balance
+        balance.balance = Decimal(str(balance.balance)) + Decimal(str(amount))
+
+        # Record recharge
+        from ..models import Recharge
+        recharge = Recharge(userId=user_id, amount=amount)
+        db.session.add(recharge)
+
+        db.session.commit()
+        return balance
+
+    @staticmethod
+    def get_balance(user_id: int) -> Decimal:
+        """
+        Get a user's current balance.
+
+        Args:
+            user_id: The user's ID
+
+        Returns:
+            Current balance as Decimal
+        """
+        balance = Balance.query.filter_by(userId=user_id).first()
+        if not balance:
+            return Decimal('0.00')
+        return Decimal(str(balance.balance))
+
+    @staticmethod
+    def execute_trade(
+        buyer_id: int,
+        seller_id: int,
+        price: float,
+        quantity: int,
+        side: str
+    ) -> Trade:
+        """
+        Execute a buy or sell trade.
+
+        For 'buy': buyer pays price * quantity
+        For 'sell': buyer receives price * quantity
+
+        Args:
+            buyer_id: The buyer's user ID
+            seller_id: The seller's user ID
+            price: Price per unit
+            quantity: Number of units
+            side: 'buy' or 'sell'
+
+        Returns:
+            Created Trade record
+
+        Raises:
+            ValueError: If validation fails
+        """
+        if side not in ('buy', 'sell'):
+            raise ValueError('Side must be buy or sell')
+        if price <= 0:
+            raise ValueError('Price must be positive')
+        if quantity <= 0:
+            raise ValueError('Quantity must be positive')
+
+        # Validate users
+        buyer = User.query.get(buyer_id)
+        seller = User.query.get(seller_id)
+
+        if not buyer:
+            raise ValueError('Buyer not found')
+        if not seller:
+            raise ValueError('Seller not found')
+        if seller.role != 'seller':
+            raise ValueError('Target user is not a seller')
+
+        # Get buyer's balance with row lock to prevent race conditions
+        buyer_balance = Balance.query.filter_by(userId=buyer_id).with_for_update().first()
+        if not buyer_balance:
+            buyer_balance = Balance(userId=buyer_id, balance=Decimal('0.00'))
+            db.session.add(buyer_balance)
+            db.session.flush()
+        import sys
+        print(f"[DEBUGGER:execute_trade:112] buyer_id={buyer_id}, buyer_balance.balance={buyer_balance.balance}", file=sys.stderr, flush=True)
+
+        # Get seller's balance with row lock
+        seller_balance = Balance.query.filter_by(userId=seller_id).with_for_update().first()
+        if not seller_balance:
+            seller_balance = Balance(userId=seller_id, balance=Decimal('0.00'))
+            db.session.add(seller_balance)
+            db.session.flush()
+        print(f"[DEBUGGER:execute_trade:121] seller_id={seller_id}, seller_balance.balance={seller_balance.balance}", file=sys.stderr, flush=True)
+
+        total_cost = Decimal(str(price)) * Decimal(str(quantity))
+        print(f"[DEBUGGER:execute_trade:124] price={price}, quantity={quantity}, total_cost={total_cost}, side={side}", file=sys.stderr, flush=True)
+
+        if side == 'buy':
+            # Buyer buys: buyer pays, seller receives
+            if Decimal(str(buyer_balance.balance)) < total_cost:
+                raise ValueError('Insufficient balance')
+            print(f"[DEBUGGER:execute_trade:130] BEFORE UPDATE: buyer_balance={buyer_balance.balance}, seller_balance={seller_balance.balance}", file=sys.stderr, flush=True)
+            buyer_balance.balance = Decimal(str(buyer_balance.balance)) - total_cost
+            seller_balance.balance = Decimal(str(seller_balance.balance)) + total_cost
+            print(f"[DEBUGGER:execute_trade:133] AFTER UPDATE: buyer_balance={buyer_balance.balance}, seller_balance={seller_balance.balance}", file=sys.stderr, flush=True)
+        else:
+            # Buyer sells: buyer receives, seller pays out (no balance check required)
+            # Seller's balance can go negative, representing total paid out
+            buyer_balance.balance = Decimal(str(buyer_balance.balance)) + total_cost
+            seller_balance.balance = Decimal(str(seller_balance.balance)) - total_cost
+
+        # Create trade record
+        trade = Trade(
+            buyerId=buyer_id,
+            sellerId=seller_id,
+            price=price,
+            quantity=quantity,
+            side=side
+        )
+        db.session.add(trade)
+        print(f"[DEBUGGER:execute_trade:148] PRE-COMMIT: buyer_balance={buyer_balance.balance}, seller_balance={seller_balance.balance}", file=sys.stderr, flush=True)
+        print(f"[DEBUGGER:execute_trade:149] buyer_balance in session: {buyer_balance in db.session}, seller_balance in session: {seller_balance in db.session}", file=sys.stderr, flush=True)
+        print(f"[DEBUGGER:execute_trade:150] buyer_balance dirty: {buyer_balance in db.session.dirty}, seller_balance dirty: {seller_balance in db.session.dirty}", file=sys.stderr, flush=True)
+        db.session.commit()
+        print(f"[DEBUGGER:execute_trade:150] POST-COMMIT: buyer_balance={buyer_balance.balance}, seller_balance={seller_balance.balance}", file=sys.stderr, flush=True)
+
+        return trade
+
+    @staticmethod
+    def get_trades(
+        user_id: int,
+        seller_id: int = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get trade history for a buyer.
+
+        Args:
+            user_id: The buyer's user ID
+            seller_id: Optional filter by seller
+            limit: Maximum records to return
+
+        Returns:
+            List of trade records with seller info
+        """
+        query = Trade.query.filter_by(buyerId=user_id)
+
+        if seller_id:
+            query = query.filter_by(sellerId=seller_id)
+
+        trades = query.order_by(Trade.timestamp.desc()).limit(limit).all()
+
+        result = []
+        for trade in trades:
+            seller = User.query.get(trade.sellerId)
+            result.append({
+                **trade.to_dict(),
+                'sellerName': seller.username if seller else 'Unknown',
+            })
+
+        return result
+
+    @staticmethod
+    def get_seller_trades(seller_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Get trade history for a seller.
+
+        Args:
+            seller_id: The seller's user ID
+            limit: Maximum records to return
+
+        Returns:
+            List of trade records with buyer info
+        """
+        trades = Trade.query.filter_by(sellerId=seller_id)\
+            .order_by(Trade.timestamp.desc())\
+            .limit(limit)\
+            .all()
+
+        result = []
+        for trade in trades:
+            buyer = User.query.get(trade.buyerId)
+            result.append({
+                **trade.to_dict(),
+                'buyerName': buyer.username if buyer else 'Unknown',
+            })
+
+        return result
+
+    @staticmethod
+    def calculate_pnl(user_id: int, seller_id: int) -> Dict[str, Any]:
+        """
+        Calculate profit/loss for a buyer's trades with a specific seller.
+
+        Args:
+            user_id: The buyer's user ID
+            seller_id: The seller's user ID
+
+        Returns:
+            Dictionary with position, cost basis, current value, and P&L
+        """
+        trades = Trade.query.filter_by(
+            buyerId=user_id,
+            sellerId=seller_id
+        ).order_by(Trade.timestamp).all()
+
+        if not trades:
+            return {
+                'position': 0,
+                'costBasis': 0,
+                'totalCost': 0,
+                'currentPrice': None,
+                'currentValue': 0,
+                'pnl': 0,
+                'pnlPercent': 0,
+            }
+
+        # Calculate position and cost basis (FIFO not implemented, using average)
+        position = 0
+        total_cost = Decimal('0.00')
+
+        for trade in trades:
+            if trade.side == 'buy':
+                position += trade.quantity
+                total_cost += Decimal(str(trade.price)) * Decimal(str(trade.quantity))
+            else:
+                position -= trade.quantity
+                # Reduce cost proportionally
+                if position > 0:
+                    avg_cost = total_cost / (position + trade.quantity)
+                    total_cost -= avg_cost * Decimal(str(trade.quantity))
+                else:
+                    total_cost = Decimal('0.00')
+
+        # Get current price
+        latest_price = Price.query.filter_by(sellerId=seller_id)\
+            .order_by(Price.date.desc(), Price.session.desc())\
+            .first()
+
+        current_price = float(latest_price.price) if latest_price else 0
+        current_value = position * current_price if position > 0 else 0
+        cost_basis = float(total_cost / position) if position > 0 else 0
+
+        pnl = current_value - float(total_cost) if position > 0 else 0
+        pnl_percent = (pnl / float(total_cost) * 100) if float(total_cost) > 0 else 0
+
+        return {
+            'position': position,
+            'costBasis': round(cost_basis, 2),
+            'totalCost': round(float(total_cost), 2),
+            'currentPrice': current_price,
+            'currentValue': round(current_value, 2),
+            'pnl': round(pnl, 2),
+            'pnlPercent': round(pnl_percent, 2),
+        }
+
+    @staticmethod
+    def calculate_total_pnl(buyer_id: int) -> Dict[str, Any]:
+        """
+        Calculate total P&L for a buyer across all sellers.
+
+        Calculates both realized P&L (from closed positions) and
+        unrealized P&L (from current open positions).
+
+        Args:
+            buyer_id: The buyer's user ID
+
+        Returns:
+            Dictionary with realized, unrealized, total P&L and return percentage
+        """
+        # Get all trades for this buyer
+        trades = Trade.query.filter_by(buyerId=buyer_id).all()
+
+        if not trades:
+            return {
+                'realizedPnl': 0,
+                'unrealizedPnl': 0,
+                'totalPnl': 0,
+                'totalInvested': 0,
+                'returnPercent': 0,
+            }
+
+        # Group trades by seller
+        seller_trades: Dict[int, list] = {}
+        for trade in trades:
+            if trade.sellerId not in seller_trades:
+                seller_trades[trade.sellerId] = []
+            seller_trades[trade.sellerId].append(trade)
+
+        total_realized_pnl = Decimal('0.00')
+        total_unrealized_pnl = Decimal('0.00')
+        total_invested = Decimal('0.00')
+
+        for seller_id, seller_trade_list in seller_trades.items():
+            # Sort trades by timestamp
+            seller_trade_list.sort(key=lambda t: t.timestamp)
+
+            # Track position and cost using average cost method
+            position = 0
+            total_cost = Decimal('0.00')
+            realized_pnl = Decimal('0.00')
+
+            for trade in seller_trade_list:
+                trade_price = Decimal(str(trade.price))
+                trade_qty = trade.quantity
+
+                if trade.side == 'buy':
+                    # Buying: add to position and cost
+                    total_cost += trade_price * Decimal(str(trade_qty))
+                    position += trade_qty
+                    total_invested += trade_price * Decimal(str(trade_qty))
+                else:
+                    # Selling: calculate realized P&L
+                    if position > 0:
+                        avg_cost = total_cost / Decimal(str(position))
+                        sell_value = trade_price * Decimal(str(trade_qty))
+                        cost_of_sold = avg_cost * Decimal(str(trade_qty))
+                        realized_pnl += sell_value - cost_of_sold
+
+                        # Update position and remaining cost
+                        position -= trade_qty
+                        if position > 0:
+                            total_cost -= cost_of_sold
+                        else:
+                            total_cost = Decimal('0.00')
+                    else:
+                        # No position to sell - skip this trade for P&L calculation
+                        pass
+
+            total_realized_pnl += realized_pnl
+
+            # Calculate unrealized P&L for remaining position
+            if position > 0:
+                latest_price = Price.query.filter_by(sellerId=seller_id)\
+                    .order_by(Price.date.desc(), Price.session.desc())\
+                    .first()
+
+                if latest_price:
+                    current_price = Decimal(str(latest_price.price))
+                    current_value = current_price * Decimal(str(position))
+                    unrealized = current_value - total_cost
+                    total_unrealized_pnl += unrealized
+
+        total_pnl = total_realized_pnl + total_unrealized_pnl
+        return_percent = (float(total_pnl) / float(total_invested) * 100) if total_invested > 0 else 0
+
+        return {
+            'realizedPnl': round(float(total_realized_pnl), 2),
+            'unrealizedPnl': round(float(total_unrealized_pnl), 2),
+            'totalPnl': round(float(total_pnl), 2),
+            'totalInvested': round(float(total_invested), 2),
+            'returnPercent': round(return_percent, 2),
+        }
+
+    @staticmethod
+    def calculate_seller_earnings(seller_id: int) -> Dict[str, Any]:
+        """
+        Calculate earnings statistics for a seller.
+
+        Args:
+            seller_id: The seller's user ID
+
+        Returns:
+            Dictionary with total earnings from buys, total payouts from sells,
+            net earnings, and transaction counts.
+        """
+        trades = Trade.query.filter_by(sellerId=seller_id).all()
+
+        if not trades:
+            return {
+                'totalReceived': 0,
+                'totalPaidOut': 0,
+                'netEarnings': 0,
+                'buyTransactions': 0,
+                'sellTransactions': 0,
+            }
+
+        total_received = Decimal('0.00')
+        total_paid_out = Decimal('0.00')
+        buy_count = 0
+        sell_count = 0
+
+        for trade in trades:
+            trade_value = Decimal(str(trade.price)) * Decimal(str(trade.quantity))
+            if trade.side == 'buy':
+                # Buyer bought from seller: seller received money
+                total_received += trade_value
+                buy_count += 1
+            else:
+                # Buyer sold to seller: seller paid out money
+                total_paid_out += trade_value
+                sell_count += 1
+
+        net_earnings = total_received - total_paid_out
+
+        return {
+            'totalReceived': round(float(total_received), 2),
+            'totalPaidOut': round(float(total_paid_out), 2),
+            'netEarnings': round(float(net_earnings), 2),
+            'buyTransactions': buy_count,
+            'sellTransactions': sell_count,
+        }

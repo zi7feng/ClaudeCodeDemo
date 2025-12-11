@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(pip show:*)",
+      "Bash(source venv/bin/activate)",
+      "Bash(ls:*)",
+      "Bash(pip install:*)",
+      "Bash(python:*)",
+      "Bash(chmod:*)",
+      "Bash(/Users/zfeng/WebstormProjects/ClaudeCodeDemo/backend/test_debug_session_bug.sh)",
+      "Bash(pkill:*)",
+      "Bash(xargs:*)",
+      "Bash(git checkout:*)",
+      "Bash(npm run build:*)"
+    ]
+  }
+}
